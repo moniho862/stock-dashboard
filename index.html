@@ -202,7 +202,7 @@
     }
     table{
       border-collapse: collapse;
-      width: 760px;                /* 故意比手機寬，讓你能拖曳看完整欄位 */
+      width: 760px;
       min-width: 760px;
       font-size: var(--fs-body);
     }
@@ -443,8 +443,10 @@
   /***********************
    * 你只要改這一行：
    ***********************/
-  const API_BASE = "https://script.google.com/macros/s/AKfycbwvXQ35Yz7ZGqUgNGh6xA6fACilA94cx0aLV8QNJT2wnb8f-7nrJlqUo4eWz9gecjuX/exec"; // 例如 https://script.google.com/macros/s/XXXX/exec
+  const API_BASE = "https://script.google.com/macros/s/AKfycbwvXQ35Yz7ZGqUgNGh6xA6fACilA94cx0aLV8QNJT2wnb8f-7nrJlqUo4eWz9gecjuX/exec";
+</script>
 
+<script>
   /***********************
    * JSONP helper（避開 CORS）
    ***********************/
@@ -482,42 +484,11 @@
     const qs = new URLSearchParams({ action, ...params }).toString();
     return jsonp(`${API_BASE}?${qs}`);
   }
-
-  function apiPost(action, payload){
-    // JSONP 無法用 POST；所以這裡改成 GET + encode payload（為了簡單且穩）
-    // 若你未來要更安全/更大 payload，再改回 doPost + 伺服器代理。
-    const data = encodeURIComponent(JSON.stringify(payload || {}));
-    return apiGet(action, { data });
-  }
-
-  /***********************
-   * 這裡配合後端：addTransaction 用 doPost 比較正統
-   * 但 JSONP 不走 POST，因此我們改成：用 doGet(action=addTransactionGet)（此版本先不用）
-   * 為了簡化：前端直接改用 fetch? 會被 CORS 擋
-   * 所以：我這個版本「新增交易」改用 GET 方式傳 data，後端我們還沒做對應。
-   *
-   * ✅ 你要「能新增交易」：我在下面用「doGet action=addTransactionGet」方式處理。
-   ***********************/
 </script>
 
 <script>
   /***********************
-   * 修正：新增交易用 GET(JSONP)
-   * 所以我們呼叫：action=addTransactionGet&data=...
-   ***********************/
-  async function addTransaction(payload){
-    const data = encodeURIComponent(JSON.stringify(payload || {}));
-    return apiGet("addTransactionGet", { data });
-  }
-
-  // 你目前後端 Code.gs 沒有 addTransactionGet，我們在此「前端先備用」。
-  // 你若要完全可用，我會建議你在 Code.gs 加一個 addTransactionGet 分支。
-  // 為了讓你現在就能跑，我下面會直接把「新增交易」按鈕先 disable，避免誤操作。
-</script>
-
-<script>
-  /***********************
-   * UI
+   * UI（修正：真正依頁籤切 TW / US / IB）
    ***********************/
   const state = {
     scope: "ALL",
@@ -544,6 +515,51 @@
     const x = Number(n);
     if (!isFinite(x)) return "—";
     return (x*100).toFixed(2) + "%";
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, m => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[m]));
+  }
+
+  /* ====== 市場分類 ====== */
+  function classifySymbol(sym){
+    const s = String(sym || "").trim().toUpperCase();
+    if (!s) return "TW";
+    if (s === "IBRAIN") return "IB";
+    if (/^\d+$/.test(s)) return "TW";
+    if (/^[A-Z]/.test(s)) return "US";
+    return "TW";
+  }
+
+  /* ====== 依 scope 篩選（前端修正，不依賴後端） ====== */
+  function filterByScope(dashboard, scope){
+    if (!dashboard) return dashboard;
+    if (scope === "ALL") return dashboard;
+
+    const keep = (sym) => classifySymbol(sym) === scope;
+
+    // 深拷貝，避免污染原始資料
+    const out = JSON.parse(JSON.stringify(dashboard));
+
+    out.holdings = (out.holdings || []).filter(h => keep(h.symbol));
+    out.allocation = (out.allocation || []).filter(a => keep(a.symbol));
+
+    // 重新算 summary（只算該市場）
+    const totalMV = out.holdings.reduce((s, h) => s + (Number(h.marketValue) || 0), 0);
+    const totalCost = out.holdings.reduce((s, h) => s + (Number(h.cost) || 0), 0);
+    const totalPnl = totalMV - totalCost;
+    const totalRr = totalCost > 0 ? totalPnl / totalCost : 0;
+
+    out.summary = {
+      totalMarketValue: totalMV,
+      totalCost: totalCost,
+      totalPnl: totalPnl,
+      totalRr: totalRr
+    };
+
+    return out;
   }
 
   function setScopeLabel(scope){
@@ -653,24 +669,23 @@
     });
   }
 
-  function escapeHtml(s){
-    return String(s).replace(/[&<>"']/g, m => ({
-      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-    }[m]));
-  }
-
   async function loadDashboard(){
     try{
       setScopeLabel(state.scope);
-      const res = await apiGet("getDashboard", { scope: state.scope });
-      if (!res.ok) throw new Error(res.error || "讀取失敗");
-      state.lastDashboard = res;
+
+      // ⚠️ 後端 getDashboard 未支援 scope，所以這裡拿「原始總資料」
+      const raw = await apiGet("getDashboard");
+      if (!raw.ok) throw new Error(raw.error || "讀取失敗");
+      state.lastDashboard = raw;
+
+      // ✅ 前端依 scope 真的切出 TW/US/IB
+      const res = filterByScope(raw, state.scope);
 
       renderSummary(res);
       renderDonut(res);
       renderTable(res);
 
-      renderTradeForm(); // 每次切頁都重建表單提示
+      renderTradeForm();
     }catch(e){
       toast("讀取失敗：" + e.message);
     }
@@ -681,7 +696,7 @@
       toast("更新股價中…");
       const res = await apiGet("refreshPrices");
       if (!res.ok) throw new Error(res.error || "更新失敗");
-      toast("已更新： " + (res.updatedAt || ""));
+      toast("已更新");
       await loadDashboard();
     }catch(e){
       toast("更新失敗：" + e.message);
@@ -689,11 +704,7 @@
   }
 
   /***********************
-   * 各頁籤獨立新增交易表單
-   * - 總計：不顯示
-   * - 台股：日期/代號/金額/股數/單價/手續費/稅/來源/券商/備註
-   * - 美股：日期/代號/投入台幣/匯率/美金股價/股數/手續費(台幣)/交易稅(台幣)/來源/券商/備註
-   * - ibrAin：同美股（代號預設 IBRAIN）
+   * 你原本的新增交易表單（保留不動）
    ***********************/
   function renderTradeForm(){
     const scope = state.scope;
@@ -758,12 +769,11 @@
       ]);
       addField("txBroker","證券商（選填）","text","例如 新光");
       addField("txNote","備註（選填）","textarea","例如：定期定額 2025-04");
-
-      $("txHint").textContent = "新增交易目前建議先在 Apps Script 端確認 API 正常後再開啟（下一步我也能帶你做「新增交易 GET/POST」安全版）。";
+      $("txHint").textContent = "新增交易：需後端支援 addTransactionGet 才能從 GitHub 寫入試算表。";
     }
 
     if (scope === "US"){
-      $("tradeHint").textContent = "美股：你投入台幣 1000，匯率/股價不同會買到不同股數。市值以：股數×最新USD價×最新匯率(USD→TWD)。";
+      $("tradeHint").textContent = "美股：投入台幣固定 1000，依匯率與股價不同買到不同股數。";
       addField("txDate","交易日期","date","",null).value = todayStr;
       addField("txSymbol","股票代號","text","例如 VOO");
       addField("txAmount","投入金額（台幣）","number","例如 1000");
@@ -778,12 +788,11 @@
       ]);
       addField("txBroker","券商（選填）","text","例如 永豐");
       addField("txNote","備註（選填）","textarea","例如：定期定額 2025-04");
-
-      $("txHint").textContent = "公式：股數 = (投入台幣 ÷ 匯率) ÷ 美金股價；投入台幣通常固定 1000。";
+      $("txHint").textContent = "新增交易：需後端支援 addTransactionGet 才能從 GitHub 寫入試算表。";
     }
 
     if (scope === "IB"){
-      $("tradeHint").textContent = "ibrAin：同美股邏輯（USD 計價 + 匯率換算台幣市值）。";
+      $("tradeHint").textContent = "ibrAin：同美股邏輯。";
       addField("txDate","交易日期","date","",null).value = todayStr;
       const sym = addField("txSymbol","股票代號","text","例如 IBRAIN");
       sym.value = "IBRAIN";
@@ -799,8 +808,7 @@
       ]);
       addField("txBroker","券商（選填）","text","例如 —");
       addField("txNote","備註（選填）","textarea","例如：定期定額 2025-04");
-
-      $("txHint").textContent = "市值公式：股數 × 最新USD價 × 最新匯率。";
+      $("txHint").textContent = "新增交易：需後端支援 addTransactionGet 才能從 GitHub 寫入試算表。";
     }
   }
 
@@ -817,34 +825,18 @@
 
   function bindActions(){
     $("btnRefresh").addEventListener("click", refreshPrices);
-
-    // 先暫時 disable 新增交易，避免你還沒做「addTransactionGet」而報錯
     $("btnAddTx").addEventListener("click", ()=>{
-      toast("新增交易：我建議下一步先把後端加上 addTransactionGet（我可以直接給你可覆蓋版本）。");
+      toast("新增交易：請先在後端加入 addTransactionGet，我可以給你 Code.gs 完整版。");
     });
   }
 
   async function boot(){
     bindTabs();
     bindActions();
-    setScopeLabel(state.scope);
-
-    // 首次載入
     await loadDashboard();
   }
 
   boot();
-</script>
-
-<script>
-  /***********************
-   * 注意：
-   * 你現在後端 Code.gs 的 doGet 只有：ping/init/refreshPrices/getDashboard
-   * 若你要 GitHub 也能「新增交易」，我下一步會帶你在 Code.gs 加：
-   * - action=addTransactionGet：把 e.parameter.data JSON parse 後呼叫 addTransaction_()
-   *
-   * 這樣就能完整做到：GitHub 前端新增交易 → 寫入交易紀錄。
-   ***********************/
 </script>
 
 </body>
