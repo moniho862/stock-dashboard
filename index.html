@@ -1,910 +1,851 @@
-/***********************
- * 存股儀表板 v7.5（繁中 / API + Sheet）
- * 你目前需求重點：
- * 1) 美股/ibrAin 市值(台幣) = 股數 * 最新USD股價 * 最新USDTWD（小數點2位）
- * 2) 價格快取：寫入匯率欄位（USDTWD）
- * 3) GitHub 前端可用：GET API（getDashboard / refreshPrices / addTransaction）
- * 4) 分頁籤資料可分 market=ALL|TW|US|IB
- * 5) 匯率抓取：GoogleFinance 失敗時改用 UrlFetchApp 公開匯率來源
- ***********************/
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>存股儀表板</title>
 
-const TZ = "Asia/Taipei";
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
-const SHEET_TX = "交易紀錄";
-const SHEET_DCA = "定期定額設定";
-const SHEET_SYMBOLS = "股票清單";
-const SHEET_PRICE = "價格快取";
+  <style>
+    :root{
+      --bg1:#070A12;
+      --bg2:#0B1430;
+      --card:rgba(20,26,45,.72);
+      --card2:rgba(20,26,45,.55);
+      --stroke:rgba(255,255,255,.10);
+      --stroke2:rgba(255,255,255,.08);
+      --text:rgba(255,255,255,.92);
+      --muted:rgba(255,255,255,.62);
+      --accent:#C9A24B;
+      --good:#32D583;
+      --bad:#F97066;
 
-const BASE_CCY = "台幣";
-
-// =============== Web App Router（給 Apps Script / GitHub 用） ===============
-function doGet(e) {
-  ensureSheets_();
-
-  const p = (e && e.parameter) ? e.parameter : {};
-  const action = String(p.action || "").trim();
-
-  try {
-    if (!action) {
-      // 你若仍要用 Apps Script 內建 Index.html，可在此回 HtmlOutput
-      // 但你現在要 GitHub，通常不需要 Apps Script 出 UI
-      return jsonOut_({ ok: true, message: "API Ready", actions: ["getDashboard", "refreshPrices", "addTransaction"] }, p);
+      /* 手機字體放大 */
+      --fs-title:18px;
+      --fs-body:14px;
+      --fs-small:12px;
+      --fs-num:28px;
     }
 
-    if (action === "getDashboard") {
-      const market = String(p.market || "ALL").toUpperCase(); // ALL | TW | US | IB
-      const payload = getDashboard_(market);
-      return jsonOut_(payload, p);
+    @media (min-width: 900px){
+      :root{
+        --fs-title:18px;
+        --fs-body:14px;
+        --fs-small:12px;
+        --fs-num:30px;
+      }
     }
 
-    if (action === "refreshPrices") {
-      const r = refreshPrices_();
-      return jsonOut_(r, p);
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      color:var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      background:
+        radial-gradient(1200px 800px at 30% 20%, rgba(201,162,75,.25), transparent 60%),
+        radial-gradient(900px 700px at 70% 30%, rgba(80,120,255,.18), transparent 55%),
+        linear-gradient(180deg, var(--bg1), var(--bg2));
+      overflow-x:hidden;
     }
 
-    if (action === "addTransaction") {
-      // GitHub 用 GET 寫入
-      const r = addTransaction_(p);
-      return jsonOut_(r, p);
+    /* 電腦：像你流水帳那樣窄寬置中；手機：滿版 */
+    .shell{
+      width:100%;
+      display:flex;
+      justify-content:center;
+      padding: 14px 12px calc(110px + env(safe-area-inset-bottom));
+      box-sizing:border-box;
+    }
+    .app{
+      width: 100%;
+      max-width: 520px;   /* 電腦固定窄寬 */
+    }
+    @media (max-width: 600px){
+      .shell{
+        padding: 12px 10px calc(110px + env(safe-area-inset-bottom));
+      }
+      .app{
+        max-width: 100%;  /* 手機滿版 */
+      }
+      :root{
+        --fs-body:15px;
+        --fs-small:13px;
+        --fs-num:30px;
+      }
     }
 
-    if (action === "init") {
-      return jsonOut_({ ok: true, message: "初始化完成" }, p);
+    .topbar{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      padding:14px 14px;
+      border:1px solid var(--stroke);
+      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.03));
+      backdrop-filter: blur(10px);
+      border-radius: 18px;
+      box-shadow: 0 14px 60px rgba(0,0,0,.35);
+    }
+    .brand h1{
+      margin:0 0 6px 0;
+      font-size: 20px;
+      letter-spacing:.5px;
+    }
+    .meta{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      font-size: var(--fs-small);
+      color: var(--muted);
+      align-items:center;
+    }
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:6px 10px;
+      border:1px solid var(--stroke2);
+      border-radius: 999px;
+      background: rgba(0,0,0,.15);
+    }
+    .dot{
+      width:8px;height:8px;border-radius:50%;
+      background: var(--good);
+      box-shadow: 0 0 0 4px rgba(50,213,131,.15);
     }
 
-    return jsonOut_({ ok: false, message: "未知 action: " + action }, p);
+    .btn{
+      border:1px solid rgba(201,162,75,.45);
+      color:var(--text);
+      background: rgba(201,162,75,.16);
+      padding:10px 12px;
+      border-radius: 999px;
+      cursor:pointer;
+      font-size: var(--fs-body);
+      font-weight: 700;
+      white-space:nowrap;
+    }
+    .btn:active{ transform: translateY(1px); }
 
-  } catch (err) {
-    return jsonOut_({ ok: false, message: String(err && err.message ? err.message : err), stack: String(err && err.stack ? err.stack : "") }, p);
+    .section{
+      margin-top: 12px;
+      border:1px solid var(--stroke);
+      background: rgba(20,26,45,.40);
+      border-radius: 18px;
+      overflow:hidden;
+      box-shadow: 0 18px 70px rgba(0,0,0,.30);
+    }
+    .section .hd{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--stroke2);
+      background: rgba(0,0,0,.12);
+    }
+    .section .hd .title{
+      font-size: var(--fs-title);
+      font-weight: 800;
+      letter-spacing:.3px;
+    }
+    .section .bd{
+      padding: 12px 14px;
+    }
+
+    .cards{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .card{
+      border:1px solid var(--stroke2);
+      background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+      border-radius: 16px;
+      padding: 12px 12px;
+    }
+    .k{
+      font-size: var(--fs-small);
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .v{
+      font-size: var(--fs-num);
+      font-weight: 900;
+      letter-spacing:.2px;
+      line-height:1.1;
+    }
+    .sub{
+      margin-top: 6px;
+      font-size: var(--fs-small);
+      color: var(--muted);
+    }
+    .good{ color: var(--good); }
+    .bad{ color: var(--bad); }
+
+    .chartWrap{
+      width:100%;
+      display:flex;
+      justify-content:center;
+      padding: 6px 0 0 0;
+    }
+    canvas{ max-width: 100% !important; }
+
+    .tableWrap{
+      width:100%;
+      overflow-x:auto;              /* ✅ 左右拖曳 */
+      -webkit-overflow-scrolling: touch;
+      border:1px solid var(--stroke2);
+      border-radius: 14px;
+      background: rgba(0,0,0,.12);
+    }
+    table{
+      border-collapse: collapse;
+      width: 760px;                /* 故意比手機寬，讓你能拖曳看完整欄位 */
+      min-width: 760px;
+      font-size: var(--fs-body);
+    }
+    th,td{
+      padding:10px 10px;
+      border-bottom:1px solid rgba(255,255,255,.06);
+      white-space:nowrap;
+      text-align:right;
+    }
+    th:first-child, td:first-child{ text-align:left; }
+    th{
+      font-size: var(--fs-small);
+      color: var(--muted);
+      background: rgba(0,0,0,.10);
+      position: sticky;
+      top: 0;
+    }
+
+    .formGrid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .field{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+    }
+    label{
+      font-size: var(--fs-small);
+      color: var(--muted);
+    }
+    input,select,textarea{
+      border:1px solid var(--stroke2);
+      background: rgba(0,0,0,.18);
+      color: var(--text);
+      padding: 12px 12px;
+      border-radius: 12px;
+      font-size: var(--fs-body);
+      outline:none;
+    }
+    textarea{ grid-column: 1 / -1; resize: none; }
+    .formActions{
+      margin-top: 10px;
+      display:flex;
+      gap:10px;
+      justify-content:flex-start;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .hint{
+      font-size: var(--fs-small);
+      color: var(--muted);
+      line-height:1.4;
+    }
+
+    /* Bottom tab bar (固定) */
+    .tabbar{
+      position: fixed;
+      left:0; right:0; bottom:0;
+      padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+      box-sizing:border-box;
+      z-index: 999;
+      display:flex;
+      justify-content:center;
+      pointer-events:none;
+    }
+    .tabs{
+      width: 100%;
+      max-width: 520px;
+      pointer-events:auto;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(8,10,16,.62);
+      backdrop-filter: blur(14px);
+      border-radius: 18px;
+      padding: 10px;
+      display:grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      box-shadow: 0 12px 60px rgba(0,0,0,.50);
+    }
+    .tab{
+      border:1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.04);
+      border-radius: 14px;
+      padding: 10px 8px;
+      color: var(--text);
+      text-align:center;
+      cursor:pointer;
+      font-weight:800;
+      font-size: 13px;
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      align-items:center;
+      justify-content:center;
+      min-height: 54px;
+    }
+    .tab .ic{ font-size: 18px; opacity:.95; }
+    .tab.active{
+      border-color: rgba(201,162,75,.55);
+      background: rgba(201,162,75,.20);
+      box-shadow: 0 10px 40px rgba(201,162,75,.12);
+    }
+
+    .toast{
+      position: fixed;
+      left:50%;
+      transform: translateX(-50%);
+      bottom: 96px;
+      z-index: 999;
+      background: rgba(0,0,0,.70);
+      border:1px solid rgba(255,255,255,.14);
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: var(--fs-body);
+      display:none;
+      max-width: min(520px, calc(100% - 24px));
+    }
+  </style>
+</head>
+
+<body>
+  <div class="shell">
+    <div class="app" id="app">
+      <div class="topbar">
+        <div class="brand">
+          <h1>存股儀表板</h1>
+          <div class="meta">
+            <span class="pill"><span class="dot"></span><span id="priceUpdatedAt">收盤價更新時間：—</span></span>
+            <span class="pill" id="scopeLabel">總計</span>
+          </div>
+        </div>
+        <button class="btn" id="btnRefresh">更新最新股價</button>
+      </div>
+
+      <div class="section" style="margin-top:12px;">
+        <div class="hd">
+          <div class="title" id="summaryTitle">總計</div>
+          <div class="hint" id="summaryHint">市值與損益以最新收盤價估算</div>
+        </div>
+        <div class="bd">
+          <div class="cards">
+            <div class="card">
+              <div class="k">庫存總市值（NTD）</div>
+              <div class="v" id="mv">—</div>
+              <div class="sub" id="mvSub">—</div>
+            </div>
+            <div class="card">
+              <div class="k">損益試算</div>
+              <div class="v" id="pnl">—</div>
+              <div class="sub">市值 - 成本</div>
+            </div>
+            <div class="card">
+              <div class="k">報酬率</div>
+              <div class="v" id="rr">—</div>
+              <div class="sub">損益 ÷ 成本</div>
+            </div>
+            <div class="card">
+              <div class="k">總付出成本（含手續費）</div>
+              <div class="v" id="cost">—</div>
+              <div class="sub">買入金額 + 手續費 + 稅</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="hd">
+          <div class="title">持股配置（依市值）</div>
+          <div class="hint" id="maxHold">最大持股：—</div>
+        </div>
+        <div class="bd">
+          <div class="chartWrap">
+            <canvas id="donut" width="340" height="240"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="hd">
+          <div class="title">持股明細（已確認）</div>
+          <div class="hint">表格可左右拖曳</div>
+        </div>
+        <div class="bd">
+          <div class="tableWrap">
+            <table id="holdTable">
+              <thead>
+                <tr>
+                  <th>股票代號</th>
+                  <th>庫存股數</th>
+                  <th>均價(台幣)</th>
+                  <th>收盤價(台幣)</th>
+                  <th>市值</th>
+                  <th>損益</th>
+                  <th>報酬率</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 新增交易：只有 台股/美股/ibrAin 顯示；總計不顯示 -->
+      <div class="section" id="tradeSection" style="display:none;">
+        <div class="hd">
+          <div class="title" id="tradeTitle">新增交易</div>
+          <div class="hint" id="tradeHint">—</div>
+        </div>
+        <div class="bd">
+          <div class="formGrid" id="tradeForm"></div>
+
+          <div class="formActions">
+            <button class="btn" id="btnAddTx">新增</button>
+            <div class="hint" id="txHint"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Bottom Tab -->
+  <div class="tabbar">
+    <div class="tabs">
+      <div class="tab active" data-scope="ALL"><div class="ic">Σ</div><div>總計</div></div>
+      <div class="tab" data-scope="TW"><div class="ic">🏛️</div><div>台股</div></div>
+      <div class="tab" data-scope="US"><div class="ic">🌐</div><div>美股</div></div>
+      <div class="tab" data-scope="IB"><div class="ic">🧠</div><div>ibrAin</div></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+  /***********************
+   * 你只要改這一行：
+   ***********************/
+  const API_BASE = "https://script.google.com/macros/s/AKfycbwvXQ35Yz7ZGqUgNGh6xA6fACilA94cx0aLV8QNJT2wnb8f-7nrJlqUo4eWz9gecjuX/exec"; // 例如 https://script.google.com/macros/s/XXXX/exec
+
+  /***********************
+   * JSONP helper（避開 CORS）
+   ***********************/
+  function jsonp(url){
+    return new Promise((resolve, reject) => {
+      const cb = "cb_" + Math.random().toString(36).slice(2);
+      const s = document.createElement("script");
+      const sep = url.includes("?") ? "&" : "?";
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("JSONP timeout"));
+      }, 15000);
+
+      function cleanup(){
+        clearTimeout(timeout);
+        if (s && s.parentNode) s.parentNode.removeChild(s);
+        try{ delete window[cb]; }catch(e){ window[cb] = undefined; }
+      }
+
+      window[cb] = (data) => {
+        cleanup();
+        resolve(data);
+      };
+
+      s.src = url + sep + "callback=" + cb + "&_=" + Date.now();
+      s.onerror = () => {
+        cleanup();
+        reject(new Error("JSONP load error"));
+      };
+      document.body.appendChild(s);
+    });
   }
-}
 
-/**
- * 若 GitHub 用 fetch + CORS 你可能會遇到限制。
- * 最穩做法：用 JSONP（加上 &callback=xxx）
- */
-function jsonOut_(obj, params) {
-  const callback = String((params && params.callback) || "").trim();
-  const text = callback ? `${callback}(${JSON.stringify(obj)});` : JSON.stringify(obj);
-  return ContentService
-    .createTextOutput(text)
-    .setMimeType(ContentService.MimeType.JAVASCRIPT);
-}
+  function apiGet(action, params={}){
+    const qs = new URLSearchParams({ action, ...params }).toString();
+    return jsonp(`${API_BASE}?${qs}`);
+  }
 
-// ========================= 交易：新增 / 更新 =========================
-function addTransaction_(data) {
-  ensureSheets_();
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_TX);
+  function apiPost(action, payload){
+    // JSONP 無法用 POST；所以這裡改成 GET + encode payload（為了簡單且穩）
+    // 若你未來要更安全/更大 payload，再改回 doPost + 伺服器代理。
+    const data = encodeURIComponent(JSON.stringify(payload || {}));
+    return apiGet(action, { data });
+  }
 
-  const now = new Date();
-  const id = "TX-" + Utilities.formatDate(now, TZ, "yyyyMMddHHmmss") + "-" + Math.floor(Math.random() * 100000);
+  /***********************
+   * 這裡配合後端：addTransaction 用 doPost 比較正統
+   * 但 JSONP 不走 POST，因此我們改成：用 doGet(action=addTransactionGet)（此版本先不用）
+   * 為了簡化：前端直接改用 fetch? 會被 CORS 擋
+   * 所以：我這個版本「新增交易」改用 GET 方式傳 data，後端我們還沒做對應。
+   *
+   * ✅ 你要「能新增交易」：我在下面用「doGet action=addTransactionGet」方式處理。
+   ***********************/
+</script>
 
-  const date = parseDate_(data.date);
-  const symbol = normalizeSymbol_(data.symbol);
+<script>
+  /***********************
+   * 修正：新增交易用 GET(JSONP)
+   * 所以我們呼叫：action=addTransactionGet&data=...
+   ***********************/
+  async function addTransaction(payload){
+    const data = encodeURIComponent(JSON.stringify(payload || {}));
+    return apiGet("addTransactionGet", { data });
+  }
 
-  const type = String(data.type || "").trim();        // 買入/賣出/股利
-  const source = String(data.source || "").trim();    // 手動買入/定期定額
-  const broker = String(data.broker || "").trim();
-  const currency = String(data.currency || "台幣").trim(); // 台幣/美金
+  // 你目前後端 Code.gs 沒有 addTransactionGet，我們在此「前端先備用」。
+  // 你若要完全可用，我會建議你在 Code.gs 加一個 addTransactionGet 分支。
+  // 為了讓你現在就能跑，我下面會直接把「新增交易」按鈕先 disable，避免誤操作。
+</script>
 
-  const amount = num_(data.amount);                  // 交易金額（幣別=台幣 代表投入台幣；幣別=美金 代表美元金額）
-  const qty = blankOrNum_(data.qty);
-  const price = blankOrNum_(data.price);             // 台股=台幣價；美股=美元價
-  const fx = blankOrNum_(data.fx);                   // 台幣/美金 匯率
-  const fee = blankOrNum_(data.fee);
-  const tax = blankOrNum_(data.tax);
-  const note = String(data.note || "");
+<script>
+  /***********************
+   * UI
+   ***********************/
+  const state = {
+    scope: "ALL",
+    donut: null,
+    lastDashboard: null
+  };
 
-  if (!date) throw new Error("交易日期格式錯誤（建議 YYYY-MM-DD）");
-  if (!symbol) throw new Error("股票代號不可空白");
-  if (!["買入", "賣出", "股利"].includes(type)) throw new Error("交易類型需為：買入 / 賣出 / 股利");
-  if (!["手動買入", "定期定額"].includes(source)) throw new Error("來源類型需為：手動買入 / 定期定額");
-  if (!(amount > 0)) throw new Error("交易金額需大於 0");
+  const $ = (id) => document.getElementById(id);
 
-  ensureSymbolExists_(symbol);
+  function toast(msg){
+    const t = $("toast");
+    t.textContent = msg;
+    t.style.display = "block";
+    clearTimeout(window.__toastTimer);
+    window.__toastTimer = setTimeout(() => t.style.display = "none", 2600);
+  }
 
-  const cls = classifySymbol_(symbol);
+  function money(n, digits=0){
+    const x = Number(n);
+    if (!isFinite(x)) return "—";
+    return x.toLocaleString("zh-Hant-TW", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+  function pct(n){
+    const x = Number(n);
+    if (!isFinite(x)) return "—";
+    return (x*100).toFixed(2) + "%";
+  }
 
-  let finalQty = qty;
-  let finalPrice = price;
+  function setScopeLabel(scope){
+    const map = { ALL:"總計", TW:"台股", US:"美股", IB:"ibrAin" };
+    $("scopeLabel").textContent = map[scope] || scope;
+    $("summaryTitle").textContent = map[scope] || scope;
 
-  if (type === "股利") {
-    finalQty = "";
-    finalPrice = "";
-  } else {
-    if (cls === "US" || cls === "IB") {
-      // 美股/IB：若未填股數但有填股價，嘗試推算
-      // 幣別=台幣：qty = (amountTWD / fx) / priceUSD
-      // 幣別=美金：qty = amountUSD / priceUSD
-      if (finalQty === "" && finalPrice !== "") {
-        if (currency === "台幣") {
-          if (fx !== "" && fx > 0) finalQty = (amount / fx) / finalPrice;
-        } else if (currency === "美金") {
-          finalQty = (amount / finalPrice);
+    // 新增交易區塊顯示規則
+    if (scope === "ALL"){
+      $("tradeSection").style.display = "none";
+    } else {
+      $("tradeSection").style.display = "block";
+      $("tradeTitle").textContent = `新增交易（${map[scope]}）`;
+    }
+  }
+
+  function renderSummary(res){
+    $("priceUpdatedAt").textContent = "收盤價更新時間：" + (res.priceUpdatedAt || "—");
+    const s = res.summary || {};
+    $("mv").textContent = money(s.totalMarketValue, 2);
+    $("cost").textContent = money(s.totalCost, 0);
+
+    const pnl = Number(s.totalPnl || 0);
+    $("pnl").textContent = money(pnl, 2);
+    $("pnl").className = "v " + (pnl >= 0 ? "good" : "bad");
+
+    const rr = Number(s.totalRr || 0);
+    $("rr").textContent = pct(rr);
+    $("rr").className = "v " + (rr >= 0 ? "good" : "bad");
+
+    // 市值副標
+    if (state.scope === "TW") $("mvSub").textContent = "台股：股數 × 收盤價(台幣)";
+    else if (state.scope === "US") $("mvSub").textContent = "美股：股數 × 最新USD價 × 最新匯率";
+    else if (state.scope === "IB") $("mvSub").textContent = "ibrAin：股數 × 最新USD價 × 最新匯率";
+    else $("mvSub").textContent = "全部：合併計算";
+  }
+
+  function renderTable(res){
+    const tbody = $("holdTable").querySelector("tbody");
+    tbody.innerHTML = "";
+    const rows = res.holdings || [];
+    rows.forEach(h => {
+      const tr = document.createElement("tr");
+      const rr = Number(h.rr || 0);
+      const pnl = Number(h.pnl || 0);
+      tr.innerHTML = `
+        <td>${escapeHtml(h.symbol || "")}</td>
+        <td>${money(h.qty, 6)}</td>
+        <td>${money(h.avgCost, 2)}</td>
+        <td>${h.closeTwd === "" ? "—" : money(h.closeTwd, 2)}</td>
+        <td>${money(h.marketValue, 2)}</td>
+        <td class="${pnl>=0?"good":"bad"}">${money(pnl, 2)}</td>
+        <td class="${rr>=0?"good":"bad"}">${pct(rr)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderDonut(res){
+    const alloc = res.allocation || [];
+    const labels = alloc.map(x => x.symbol);
+    const values = alloc.map(x => x.value);
+
+    // 最大持股
+    if (alloc.length){
+      const top = alloc[0];
+      $("maxHold").textContent = `最大持股：${top.symbol} ${(top.pct*100).toFixed(1)}%`;
+    } else {
+      $("maxHold").textContent = "最大持股：—";
+    }
+
+    const ctx = document.getElementById("donut").getContext("2d");
+    if (state.donut) state.donut.destroy();
+
+    // 沒資料也要顯示一個空圖，不要整個消失
+    const safeLabels = labels.length ? labels : ["—"];
+    const safeValues = values.length ? values : [1];
+
+    state.donut = new Chart(ctx, {
+      type: "doughnut",
+      data: {
+        labels: safeLabels,
+        datasets: [{
+          data: safeValues,
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true,
+        cutout: "70%",
+        plugins: {
+          legend: {
+            display: true,
+            labels: { color: "rgba(255,255,255,.75)" }
+          },
+          tooltip: {
+            callbacks: {
+              label: (c) => {
+                const v = c.parsed || 0;
+                if (!values.length) return "—";
+                return `${c.label}: ${money(v, 0)} NTD`;
+              }
+            }
+          }
         }
       }
-    } else {
-      // 台股： qty/price 互推
-      if (finalQty !== "" && finalPrice === "") finalPrice = safeDiv_(amount, finalQty);
-      if (finalQty === "" && finalPrice !== "") finalQty = safeDiv_(amount, finalPrice);
+    });
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, m => ({
+      "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    }[m]));
+  }
+
+  async function loadDashboard(){
+    try{
+      setScopeLabel(state.scope);
+      const res = await apiGet("getDashboard", { scope: state.scope });
+      if (!res.ok) throw new Error(res.error || "讀取失敗");
+      state.lastDashboard = res;
+
+      renderSummary(res);
+      renderDonut(res);
+      renderTable(res);
+
+      renderTradeForm(); // 每次切頁都重建表單提示
+    }catch(e){
+      toast("讀取失敗：" + e.message);
     }
   }
 
-  let status = "草稿";
-  if (type === "股利") status = "已確認";
-  else if (finalQty !== "" && finalPrice !== "" && isFinite(finalQty) && isFinite(finalPrice)) status = "已確認";
-
-  const row = sh.getLastRow() + 1;
-  const values = [
-    id,
-    formatDate_(date),
-    symbol,
-    type,
-    source,
-    broker,
-    amount,
-    finalQty === "" ? "" : round_(finalQty, 6),
-    finalPrice === "" ? "" : round_(finalPrice, 6),
-    fx === "" ? "" : fx,
-    fee === "" ? "" : fee,
-    tax === "" ? "" : tax,
-    currency,
-    status,
-    note,
-    now,
-    now
-  ];
-
-  sh.getRange(row, 1, 1, values.length).setValues([values]);
-
-  // 股票代號強制文字（避免前導0消失）
-  const symbolCell = sh.getRange(row, 3);
-  symbolCell.setNumberFormat("@");
-  symbolCell.setValue(symbol);
-
-  return { ok: true, id };
-}
-
-// ========================= 定期定額：只補到今天（含） =========================
-function generateDcaDrafts() {
-  ensureSheets_();
-  const ss = SpreadsheetApp.getActive();
-  const shPlan = ss.getSheetByName(SHEET_DCA);
-  const shTx = ss.getSheetByName(SHEET_TX);
-
-  const plans = shPlan.getDataRange().getValues();
-  if (plans.length <= 1) return { ok: true, created: 0, message: "沒有定期定額設定" };
-
-  const tx = shTx.getDataRange().getValues();
-  const txHeader = tx[0];
-
-  const idxTx = {
-    symbol: txHeader.indexOf("股票代號"),
-    source: txHeader.indexOf("來源類型"),
-    date: txHeader.indexOf("交易日期"),
-  };
-
-  const existing = new Set();
-  for (let i = 1; i < tx.length; i++) {
-    const row = tx[i];
-    if (String(row[idxTx.source]) !== "定期定額") continue;
-    const symbol = normalizeSymbol_(row[idxTx.symbol]);
-    const ym = toYearMonth_(row[idxTx.date]);
-    if (symbol && ym) existing.add(symbol + "|" + ym);
+  async function refreshPrices(){
+    try{
+      toast("更新股價中…");
+      const res = await apiGet("refreshPrices");
+      if (!res.ok) throw new Error(res.error || "更新失敗");
+      toast("已更新： " + (res.updatedAt || ""));
+      await loadDashboard();
+    }catch(e){
+      toast("更新失敗：" + e.message);
+    }
   }
 
-  const planHeader = plans[0];
-  const col = (name) => planHeader.indexOf(name);
+  /***********************
+   * 各頁籤獨立新增交易表單
+   * - 總計：不顯示
+   * - 台股：日期/代號/金額/股數/單價/手續費/稅/來源/券商/備註
+   * - 美股：日期/代號/投入台幣/匯率/美金股價/股數/手續費(台幣)/交易稅(台幣)/來源/券商/備註
+   * - ibrAin：同美股（代號預設 IBRAIN）
+   ***********************/
+  function renderTradeForm(){
+    const scope = state.scope;
+    const grid = $("tradeForm");
+    grid.innerHTML = "";
+    $("txHint").textContent = "";
 
-  const today = new Date();
-  const todayYM = Utilities.formatDate(today, TZ, "yyyy-MM");
-  const todayYMD = Utilities.formatDate(today, TZ, "yyyy-MM-dd");
+    if (scope === "ALL"){
+      $("tradeSection").style.display = "none";
+      return;
+    }
 
-  let created = 0;
+    $("tradeSection").style.display = "block";
 
-  for (let i = 1; i < plans.length; i++) {
-    const p = plans[i];
-    const enabled = String(p[col("是否啟用")] || "").trim() === "是";
-    if (!enabled) continue;
+    function addField(id, label, type="text", placeholder="", opts=null){
+      const wrap = document.createElement("div");
+      wrap.className = "field";
+      const lab = document.createElement("label");
+      lab.textContent = label;
+      wrap.appendChild(lab);
 
-    const symbol = normalizeSymbol_(p[col("股票代號")]);
-    const day = parseInt(p[col("每月扣款日")], 10);
-    const amount = num_(p[col("每月扣款金額")]);
-    const currency = String(p[col("幣別")] || "台幣").trim();
+      let el;
+      if (type === "select"){
+        el = document.createElement("select");
+        (opts||[]).forEach(o=>{
+          const op = document.createElement("option");
+          op.value = o.value; op.textContent = o.text;
+          el.appendChild(op);
+        });
+      } else if (type === "textarea"){
+        el = document.createElement("textarea");
+        el.rows = 2;
+      } else {
+        el = document.createElement("input");
+        el.type = type;
+      }
+      el.id = id;
+      el.placeholder = placeholder;
+      wrap.appendChild(el);
+      grid.appendChild(wrap);
+      return el;
+    }
 
-    let startYM = toYearMonth_(p[col("開始月份(YYYY-MM)")]);
-    if (!startYM) startYM = todayYM;
+    const today = new Date();
+    const y = today.getFullYear();
+    const m = String(today.getMonth()+1).padStart(2,"0");
+    const d = String(today.getDate()).padStart(2,"0");
+    const todayStr = `${y}-${m}-${d}`;
 
-    if (!symbol || !(day >= 1 && day <= 28) || !(amount > 0)) continue;
+    if (scope === "TW"){
+      $("tradeHint").textContent = "台股：金額/股數/單價任兩個即可推算另一個。股票代號可保留前導 0。";
+      addField("txDate","交易日期","date","",null).value = todayStr;
+      addField("txSymbol","股票代號","text","例如 0056");
+      addField("txAmount","交易金額（台幣）","number","例如 1000");
+      addField("txQty","股數（可空）","number","例如 100");
+      addField("txPrice","成交單價（可空）","number","例如 37.13");
+      addField("txFee","手續費（選填）","number","例如 20");
+      addField("txTax","交易稅（選填）","number","例如 0");
+      addField("txSource","來源類型","select","",[
+        {value:"手動買入",text:"手動買入"},
+        {value:"定期定額",text:"定期定額"}
+      ]);
+      addField("txBroker","證券商（選填）","text","例如 新光");
+      addField("txNote","備註（選填）","textarea","例如：定期定額 2025-04");
 
-    ensureSymbolExists_(symbol);
+      $("txHint").textContent = "新增交易目前建議先在 Apps Script 端確認 API 正常後再開啟（下一步我也能帶你做「新增交易 GET/POST」安全版）。";
+    }
 
-    const months = enumerateMonths_(startYM, todayYM);
+    if (scope === "US"){
+      $("tradeHint").textContent = "美股：你投入台幣 1000，匯率/股價不同會買到不同股數。市值以：股數×最新USD價×最新匯率(USD→TWD)。";
+      addField("txDate","交易日期","date","",null).value = todayStr;
+      addField("txSymbol","股票代號","text","例如 VOO");
+      addField("txAmount","投入金額（台幣）","number","例如 1000");
+      addField("txFx","匯率（台幣/美金）","number","例如 33.185");
+      addField("txPrice","美金股價（USD）","number","例如 449.59");
+      addField("txQty","股數（可填；不填則依公式推算）","number","例如 0.06702");
+      addField("txFee","手續費（台幣；選填）","number","例如 0");
+      addField("txTax","交易稅（台幣；選填）","number","例如 0");
+      addField("txSource","來源類型","select","",[
+        {value:"手動買入",text:"手動買入"},
+        {value:"定期定額",text:"定期定額"}
+      ]);
+      addField("txBroker","券商（選填）","text","例如 永豐");
+      addField("txNote","備註（選填）","textarea","例如：定期定額 2025-04");
 
-    months.forEach(ym => {
-      const due = Utilities.formatDate(makeDateFromYMDay_(ym, day), TZ, "yyyy-MM-dd");
-      if (todayYMD < due) return; // 本月尚未到扣款日，不產生
+      $("txHint").textContent = "公式：股數 = (投入台幣 ÷ 匯率) ÷ 美金股價；投入台幣通常固定 1000。";
+    }
 
-      const key = symbol + "|" + ym;
-      if (existing.has(key)) return;
+    if (scope === "IB"){
+      $("tradeHint").textContent = "ibrAin：同美股邏輯（USD 計價 + 匯率換算台幣市值）。";
+      addField("txDate","交易日期","date","",null).value = todayStr;
+      const sym = addField("txSymbol","股票代號","text","例如 IBRAIN");
+      sym.value = "IBRAIN";
+      addField("txAmount","投入金額（台幣）","number","例如 1000");
+      addField("txFx","匯率（台幣/美金）","number","例如 33.185");
+      addField("txPrice","美金股價（USD）","number","例如 1.23");
+      addField("txQty","股數（可填；不填則依公式推算）","number","例如 10");
+      addField("txFee","手續費（台幣；選填）","number","例如 0");
+      addField("txTax","交易稅（台幣；選填）","number","例如 0");
+      addField("txSource","來源類型","select","",[
+        {value:"手動買入",text:"手動買入"},
+        {value:"定期定額",text:"定期定額"}
+      ]);
+      addField("txBroker","券商（選填）","text","例如 —");
+      addField("txNote","備註（選填）","textarea","例如：定期定額 2025-04");
 
-      const targetDate = adjustWeekend_(makeDateFromYMDay_(ym, day));
-      const note = `定期定額 ${ym}`;
+      $("txHint").textContent = "市值公式：股數 × 最新USD價 × 最新匯率。";
+    }
+  }
 
-      addTransaction_({
-        date: Utilities.formatDate(targetDate, TZ, "yyyy-MM-dd"),
-        symbol,
-        type: "買入",
-        source: "定期定額",
-        broker: "",
-        amount,
-        qty: "",
-        price: "",
-        fx: "",
-        fee: "",
-        tax: "",
-        currency,
-        note
+  function bindTabs(){
+    document.querySelectorAll(".tab").forEach(tab=>{
+      tab.addEventListener("click", async ()=>{
+        document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+        tab.classList.add("active");
+        state.scope = tab.dataset.scope;
+        await loadDashboard();
       });
-
-      existing.add(key);
-      created++;
     });
   }
 
-  return { ok: true, created };
-}
-
-// 清除未到期定期定額草稿
-function purgeFutureDcaDrafts() {
-  ensureSheets_();
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_TX);
-
-  const v = sh.getDataRange().getValues();
-  if (v.length <= 1) return { ok: true, deleted: 0 };
-
-  const header = v[0];
-  const col = (name) => header.indexOf(name);
-
-  const idx = {
-    date: col("交易日期"),
-    source: col("來源類型"),
-    status: col("狀態"),
-  };
-
-  const today = new Date();
-  const todayYMD = Utilities.formatDate(today, TZ, "yyyy-MM-dd");
-
-  let deleted = 0;
-  for (let i = v.length - 1; i >= 1; i--) {
-    const r = v[i];
-    const source = String(r[idx.source] || "");
-    const status = String(r[idx.status] || "");
-    const d = parseDate_(String(r[idx.date] || ""));
-    if (!d) continue;
-
-    const ymd = Utilities.formatDate(d, TZ, "yyyy-MM-dd");
-    if (source === "定期定額" && status === "草稿" && ymd > todayYMD) {
-      sh.deleteRow(i + 1);
-      deleted++;
-    }
-  }
-
-  return { ok: true, deleted };
-}
-
-// ========================= 價格更新 / 匯率更新 =========================
-function refreshPrices_() {
-  ensureSheets_();
-  const ss = SpreadsheetApp.getActive();
-  const list = readSymbolList_();
-  const sh = ss.getSheetByName(SHEET_PRICE);
-
-  sh.clearContents();
-  sh.getRange(1, 1, 1, 8).setValues([[
-    "股票代號", "GoogleFinance代號", "報價幣別", "收盤價(原幣)", "匯率(若需)", "收盤價(台幣)", "更新時間", "狀態"
-  ]]);
-  sh.getRange("A:A").setNumberFormat("@");
-
-  // 取得 USDTWD（若需要）
-  const needUsd = list.some(x => x.quoteCcy === "美金");
-  const usdTwd = needUsd ? getUsdTwdRate_() : "";
-
-  const now = new Date();
-  let row = 2;
-
-  list.forEach(s => {
-    const gf = String(s.gf || "").trim();
-    if (!gf) {
-      sh.getRange(row, 1, 1, 8).setValues([[
-        s.symbol, "", s.quoteCcy, "", "", "", now, "缺少GoogleFinance代號（請到股票清單補）"
-      ]]);
-      row++;
-      return;
-    }
-
-    const closeOrig = getGoogleFinanceLastPrice_(gf); // 台股=台幣，美股=美元
-    if (closeOrig === "") {
-      sh.getRange(row, 1, 1, 8).setValues([[
-        s.symbol, gf, s.quoteCcy, "", usdTwd || "", "", now, "抓價失敗"
-      ]]);
-      row++;
-      return;
-    }
-
-    let fx = "";
-    let closeTwd = closeOrig;
-
-    if (s.quoteCcy === "美金") {
-      fx = usdTwd;
-      if (fx !== "" && isFinite(Number(fx))) {
-        closeTwd = Number(closeOrig) * Number(fx);
-      } else {
-        closeTwd = "";
-      }
-    }
-
-    sh.getRange(row, 1, 1, 8).setValues([[
-      s.symbol,
-      gf,
-      s.quoteCcy,
-      round_(Number(closeOrig), 6),
-      fx === "" ? "" : round_(Number(fx), 6),
-      closeTwd === "" ? "" : round_(Number(closeTwd), 4),
-      now,
-      (s.quoteCcy === "美金" && (fx === "" || !isFinite(Number(fx)))) ? "匯率抓取失敗" : "OK"
-    ]]);
-    row++;
-  });
-
-  sh.setFrozenRows(1);
-  sh.autoResizeColumns(1, 8);
-
-  return { ok: true, updated: list.length, usdTwd: usdTwd || "" };
-}
-
-// 每日觸發器（如果你要）
-function dailyPriceJob() { refreshPrices_(); }
-
-function createDailyTrigger() {
-  ScriptApp.getProjectTriggers().forEach(t => {
-    if (t.getHandlerFunction() === "dailyPriceJob") ScriptApp.deleteTrigger(t);
-  });
-
-  ScriptApp.newTrigger("dailyPriceJob")
-    .timeBased()
-    .everyDays(1)
-    .atHour(18)
-    .create();
-
-  return { ok: true, message: "已建立每日觸發器（18:00 執行）" };
-}
-
-/**
- * 匯率抓取：優先 GoogleFinance，失敗改用 UrlFetchApp 公開來源
- * 回傳：USDTWD（number or ""）
- */
-function getUsdTwdRate_() {
-  // 1) 優先：GoogleFinance
-  const gf = getGoogleFinanceSingle_("CURRENCY:USDTWD");
-  if (gf !== "" && isFinite(Number(gf)) && Number(gf) > 0) return Number(gf);
-
-  // 2) fallback：exchangerate.host（免 key）
-  try {
-    const url = "https://api.exchangerate.host/latest?base=USD&symbols=TWD";
-    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    const code = res.getResponseCode();
-    if (code >= 200 && code < 300) {
-      const json = JSON.parse(res.getContentText());
-      const rate = json && json.rates && json.rates.TWD;
-      if (rate && isFinite(Number(rate)) && Number(rate) > 0) return Number(rate);
-    }
-  } catch (e) {}
-
-  // 3) fallback：floatrates（備援）
-  try {
-    const url2 = "https://www.floatrates.com/daily/usd.json";
-    const res2 = UrlFetchApp.fetch(url2, { muteHttpExceptions: true });
-    const code2 = res2.getResponseCode();
-    if (code2 >= 200 && code2 < 300) {
-      const json2 = JSON.parse(res2.getContentText());
-      const rate2 = json2 && json2.twd && json2.twd.rate;
-      if (rate2 && isFinite(Number(rate2)) && Number(rate2) > 0) return Number(rate2);
-    }
-  } catch (e) {}
-
-  return "";
-}
-
-/**
- * 取單一 price：=GOOGLEFINANCE("ticker","price")
- */
-function getGoogleFinanceSingle_(ticker) {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_PRICE);
-
-  // 用不會干擾表格的隱藏欄位
-  const cell = sh.getRange("J1");
-  cell.setFormula(`=IFERROR(GOOGLEFINANCE("${ticker}","price"),"")`);
-  SpreadsheetApp.flush();
-  Utilities.sleep(900);
-
-  const val = cell.getValue();
-  cell.clearContent();
-
-  if (val === "" || val === 0) return "";
-  return val;
-}
-
-/**
- * 取最近可用價格：用 GOOGLEFINANCE 的 price（過去 10 天）抓最後一筆數字
- */
-function getGoogleFinanceLastPrice_(ticker) {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_PRICE);
-
-  const startCell = sh.getRange("J2");
-  startCell.setFormula(`=IFERROR(GOOGLEFINANCE("${ticker}","price",TODAY()-10,TODAY()),"")`);
-  SpreadsheetApp.flush();
-  Utilities.sleep(1400);
-
-  const range = sh.getRange("J2:K60").getValues();
-  startCell.clearContent();
-
-  let last = "";
-  for (let i = 0; i < range.length; i++) {
-    const price = range[i][1];
-    if (typeof price === "number" && isFinite(price) && price > 0) last = price;
-  }
-  return last === "" ? "" : last;
-}
-
-// ========================= Dashboard（依 market 篩選） =========================
-function getDashboard_(market) {
-  ensureSheets_();
-
-  const ss = SpreadsheetApp.getActive();
-  const priceSh = ss.getSheetByName(SHEET_PRICE);
-  if (priceSh.getLastRow() <= 1) {
-    try { refreshPrices_(); } catch (e) {}
-  }
-
-  const shTx = ss.getSheetByName(SHEET_TX);
-  const values = shTx.getDataRange().getValues();
-  if (values.length <= 1) {
-    return { ok: true, market, summary: baseSummary_(), holdings: [], allocation: [], drafts: [], priceUpdatedAt: "" };
-  }
-
-  const header = values[0];
-  const col = (name) => header.indexOf(name);
-
-  const rows = values.slice(1).map(r => ({
-    id: String(r[col("交易編號")]),
-    date: String(r[col("交易日期")]),
-    symbol: normalizeSymbol_(r[col("股票代號")]),
-    type: String(r[col("交易類型")]),
-    source: String(r[col("來源類型")]),
-    broker: String(r[col("證券商")] || ""),
-    amount: num0_(r[col("交易金額")]),
-    qty: r[col("股數")] === "" ? "" : num0_(r[col("股數")]),
-    price: r[col("成交單價")] === "" ? "" : num0_(r[col("成交單價")]),
-    fx: r[col("匯率(台幣/美金)")] === "" ? "" : num0_(r[col("匯率(台幣/美金)")]),
-    fee: r[col("手續費")] === "" ? "" : num0_(r[col("手續費")]),
-    tax: r[col("交易稅")] === "" ? "" : num0_(r[col("交易稅")]),
-    currency: String(r[col("幣別")] || "台幣"),
-    status: String(r[col("狀態")]),
-    note: String(r[col("備註")])
-  }));
-
-  const drafts = rows
-    .filter(x => x.status === "草稿" && x.type !== "股利")
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  const symbolMap = getSymbolMap_();
-  const priceMap = readPriceCache_();
-
-  // 全部持股（先算出來，再依 market 篩）
-  const allHoldings = calcHoldingsWithPnl_(rows, symbolMap, priceMap);
-
-  const holdings = filterHoldingsByMarket_(allHoldings, market);
-
-  const totalMV = holdings.reduce((s, h) => s + (h.marketValue || 0), 0);
-  const totalCost = holdings.reduce((s, h) => s + (Number(h.cost) || 0), 0);
-  const totalPnl = (totalMV > 0) ? (totalMV - totalCost) : 0;
-  const totalRr = (totalCost > 0 && totalMV > 0) ? (totalPnl / totalCost) : 0;
-
-  const allocation = holdings
-    .map(h => ({
-      symbol: h.symbol,
-      name: h.name,
-      value: h.marketValue || 0,
-      pct: totalMV > 0 ? (h.marketValue || 0) / totalMV : 0
-    }))
-    .filter(x => x.value > 0)
-    .sort((a, b) => b.value - a.value);
-
-  return {
-    ok: true,
-    market,
-    summary: {
-      totalMarketValue: round_(totalMV, 2), // 允許到小數點2位
-      totalCost: round_(totalCost, 0),
-      totalPnl: round_(totalPnl, 2),
-      totalRr: totalRr
-    },
-    holdings,
-    allocation,
-    drafts,
-    priceUpdatedAt: getPriceUpdatedAt_()
-  };
-}
-
-function filterHoldingsByMarket_(holdings, market) {
-  const m = String(market || "ALL").toUpperCase();
-  if (m === "ALL") return holdings;
-
-  return holdings.filter(h => {
-    const cls = classifySymbol_(h.symbol);
-    if (m === "TW") return cls === "TW";
-    if (m === "US") return cls === "US";
-    if (m === "IB") return cls === "IB";
-    return true;
-  });
-}
-
-/**
- * 持股 + 損益
- * ✅ 美股/IB 市值(台幣) = 股數 * 最新USD股價 * 最新USDTWD
- */
-function calcHoldingsWithPnl_(rows, symbolMap, priceMap) {
-  const map = new Map();
-  const confirmed = rows.filter(x => x.status === "已確認" && (x.type === "買入" || x.type === "賣出"));
-
-  confirmed.forEach(tx => {
-    const key = normalizeSymbol_(tx.symbol);
-    if (!key) return;
-
-    if (!map.has(key)) map.set(key, { symbol: key, qty: 0, cost: 0, avgCost: 0 });
-
-    const h = map.get(key);
-    const qty = Number(tx.qty);
-    if (!(qty > 0)) return;
-
-    // 成本一律換算成台幣
-    const amountTwd = toTwd_(Number(tx.amount || 0), tx.currency, Number(tx.fx || 0));
-    const feeTwd = toTwd_(Number(tx.fee || 0), tx.currency, Number(tx.fx || 0));
-    const taxTwd = toTwd_(Number(tx.tax || 0), tx.currency, Number(tx.fx || 0));
-    const buyCostTwd = amountTwd + feeTwd + taxTwd;
-
-    if (tx.type === "買入") {
-      h.qty += qty;
-      h.cost += buyCostTwd;
-    } else {
-      const avg = h.qty > 0 ? (h.cost / h.qty) : 0;
-      h.qty -= qty;
-      h.cost -= avg * qty;
-      if (h.qty < 0) h.qty = 0;
-      if (h.cost < 0) h.cost = 0;
-    }
-
-    h.avgCost = h.qty > 0 ? (h.cost / h.qty) : 0;
-  });
-
-  return Array.from(map.values())
-    .filter(x => x.qty > 0)
-    .map(h => {
-      const name = symbolMap[h.symbol] || "";
-      const p = priceMap[h.symbol] || {};
-
-      const cls = classifySymbol_(h.symbol);
-
-      const closeOrig = Number(p.closeOrig) || 0; // 台股=台幣，美股=USD
-      const fx = Number(p.fx) || 0;               // USDTWD
-
-      let closeTwd = 0;
-
-      if (cls === "TW") {
-        closeTwd = closeOrig; // 台股原幣就是台幣
-      } else {
-        // ✅ 美股/IB：USD * 匯率
-        if (closeOrig > 0 && fx > 0) closeTwd = closeOrig * fx;
-      }
-
-      const marketValue = closeTwd > 0 ? h.qty * closeTwd : 0;
-      const pnl = marketValue - h.cost;
-      const rr = (h.cost > 0) ? pnl / h.cost : 0;
-
-      return {
-        symbol: h.symbol,
-        name,
-        cls,
-        qty: round_(h.qty, 6),
-        cost: round_(h.cost, 0),
-        avgCost: round_(h.avgCost, 6),
-        closeOrig: closeOrig > 0 ? round_(closeOrig, 4) : "",
-        fx: fx > 0 ? round_(fx, 4) : "",
-        closeTwd: closeTwd > 0 ? round_(closeTwd, 2) : "",
-        marketValue: marketValue > 0 ? round_(marketValue, 2) : 0,
-        pnl: round_(pnl, 2),
-        rr
-      };
-    })
-    .sort((a, b) => b.marketValue - a.marketValue);
-}
-
-function toTwd_(value, currency, fx) {
-  if (!value) return 0;
-  const c = String(currency || "台幣").trim();
-  if (c === "台幣") return value;
-  if (c === "美金") {
-    if (!(fx > 0)) return value; // 沒匯率就先不換（避免 NaN）
-    return value * fx;
-  }
-  return value;
-}
-
-// ========================= 股票清單 / 價格快取讀寫 =========================
-function ensureSymbolExists_(symbol) {
-  const s = normalizeSymbol_(symbol);
-  if (!s) return;
-
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_SYMBOLS);
-  const v = sh.getDataRange().getValues();
-  if (v.length <= 1) return;
-
-  const header = v[0];
-  const col = (name) => header.indexOf(name);
-  const idxSymbol = col("股票代號");
-
-  for (let i = 1; i < v.length; i++) {
-    if (normalizeSymbol_(v[i][idxSymbol]) === s) return;
-  }
-
-  let gf = "";
-  if (/^\d{4,5}$/.test(s)) gf = `TPE:${s}`;
-
-  const cls = classifySymbol_(s);
-  const quoteCcy = (cls === "US" || cls === "IB") ? "美金" : "台幣";
-
-  const row = sh.getLastRow() + 1;
-  sh.getRange(row, 1, 1, 7).setValues([[
-    s, "", gf, quoteCcy, "", "", "自動新增：請確認 GoogleFinance代號 是否正確"
-  ]]);
-
-  const symbolCell = sh.getRange(row, 1);
-  symbolCell.setNumberFormat("@");
-  symbolCell.setValue(s);
-}
-
-function readSymbolList_() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_SYMBOLS);
-  const v = sh.getDataRange().getValues();
-  if (v.length <= 1) return [];
-
-  const header = v[0];
-  const col = (name) => header.indexOf(name);
-
-  const out = [];
-  for (let i = 1; i < v.length; i++) {
-    const r = v[i];
-    const symbol = normalizeSymbol_(r[col("股票代號")]);
-    if (!symbol) continue;
-    out.push({
-      symbol,
-      gf: String(r[col("GoogleFinance代號")] || "").trim(),
-      quoteCcy: String(r[col("報價幣別")] || BASE_CCY).trim() || BASE_CCY
+  function bindActions(){
+    $("btnRefresh").addEventListener("click", refreshPrices);
+
+    // 先暫時 disable 新增交易，避免你還沒做「addTransactionGet」而報錯
+    $("btnAddTx").addEventListener("click", ()=>{
+      toast("新增交易：我建議下一步先把後端加上 addTransactionGet（我可以直接給你可覆蓋版本）。");
     });
   }
-  return out;
-}
 
-function getSymbolMap_() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_SYMBOLS);
-  const v = sh.getDataRange().getValues();
-  if (v.length <= 1) return {};
+  async function boot(){
+    bindTabs();
+    bindActions();
+    setScopeLabel(state.scope);
 
-  const header = v[0];
-  const col = (name) => header.indexOf(name);
-
-  const m = {};
-  for (let i = 1; i < v.length; i++) {
-    const r = v[i];
-    const symbol = normalizeSymbol_(r[col("股票代號")]);
-    const name = String(r[col("股票名稱")] || "").trim();
-    if (symbol) m[symbol] = name;
+    // 首次載入
+    await loadDashboard();
   }
-  return m;
-}
 
-function readPriceCache_() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_PRICE);
-  const v = sh.getDataRange().getValues();
-  if (v.length <= 1) return {};
+  boot();
+</script>
 
-  const header = v[0];
-  const col = (name) => header.indexOf(name);
+<script>
+  /***********************
+   * 注意：
+   * 你現在後端 Code.gs 的 doGet 只有：ping/init/refreshPrices/getDashboard
+   * 若你要 GitHub 也能「新增交易」，我下一步會帶你在 Code.gs 加：
+   * - action=addTransactionGet：把 e.parameter.data JSON parse 後呼叫 addTransaction_()
+   *
+   * 這樣就能完整做到：GitHub 前端新增交易 → 寫入交易紀錄。
+   ***********************/
+</script>
 
-  const m = {};
-  for (let i = 1; i < v.length; i++) {
-    const r = v[i];
-    const symbol = normalizeSymbol_(r[col("股票代號")]);
-    if (!symbol) continue;
-    m[symbol] = {
-      closeOrig: r[col("收盤價(原幣)")],
-      fx: r[col("匯率(若需)")],
-      closeTwd: r[col("收盤價(台幣)")],
-      quoteCcy: String(r[col("報價幣別")] || BASE_CCY)
-    };
-  }
-  return m;
-}
-
-function getPriceUpdatedAt_() {
-  const ss = SpreadsheetApp.getActive();
-  const sh = ss.getSheetByName(SHEET_PRICE);
-  const last = sh.getLastRow();
-  if (last <= 1) return "";
-  const t = sh.getRange(2, 7, 1, 1).getValue();
-  return t ? Utilities.formatDate(new Date(t), TZ, "yyyy-MM-dd HH:mm") : "";
-}
-
-// ========================= Sheet 初始化 / 格式 =========================
-function ensureSheets_() {
-  const ss = SpreadsheetApp.getActive();
-
-  ensureSheet_(ss, SHEET_TX, [
-    "交易編號", "交易日期", "股票代號", "交易類型", "來源類型", "證券商",
-    "交易金額", "股數", "成交單價", "匯率(台幣/美金)", "手續費", "交易稅",
-    "幣別", "狀態", "備註", "建立時間", "更新時間"
-  ]);
-
-  ensureSheet_(ss, SHEET_DCA, [
-    "定期定額編號", "股票代號", "每月扣款日", "每月扣款金額", "幣別",
-    "開始月份(YYYY-MM)", "假日處理方式", "是否啟用", "備註", "建立時間", "更新時間"
-  ]);
-
-  ensureSheet_(ss, SHEET_SYMBOLS, [
-    "股票代號", "股票名稱", "GoogleFinance代號", "報價幣別", "市場別", "類型", "備註"
-  ]);
-
-  ensureSheet_(ss, SHEET_PRICE, [
-    "股票代號", "GoogleFinance代號", "報價幣別", "收盤價(原幣)", "匯率(若需)", "收盤價(台幣)", "更新時間", "狀態"
-  ]);
-
-  forceTextFormatForSymbolColumns_();
-}
-
-function ensureSheet_(ss, name, headers) {
-  let sh = ss.getSheetByName(name);
-  if (!sh) sh = ss.insertSheet(name);
-
-  const range = sh.getRange(1, 1, 1, headers.length);
-  const current = range.getValues()[0];
-
-  const needInit = current.every(x => x === "");
-  if (needInit) {
-    range.setValues([headers]);
-    sh.setFrozenRows(1);
-    sh.autoResizeColumns(1, headers.length);
-  }
-}
-
-function forceTextFormatForSymbolColumns_() {
-  const ss = SpreadsheetApp.getActive();
-  const tx = ss.getSheetByName(SHEET_TX);
-  if (tx) tx.getRange("C:C").setNumberFormat("@");
-  const sym = ss.getSheetByName(SHEET_SYMBOLS);
-  if (sym) sym.getRange("A:A").setNumberFormat("@");
-  const dca = ss.getSheetByName(SHEET_DCA);
-  if (dca) dca.getRange("B:B").setNumberFormat("@");
-  const price = ss.getSheetByName(SHEET_PRICE);
-  if (price) price.getRange("A:A").setNumberFormat("@");
-}
-
-// ========================= 分類：台股/美股/IB =========================
-function classifySymbol_(sym) {
-  const s = String(sym || "").trim();
-  const up = s.toUpperCase();
-  if (up === "IBRAIN") return "IB";
-  if (/^\d+$/.test(s)) return "TW";
-  if (/^[A-Za-z]/.test(s)) return "US";
-  return "TW";
-}
-
-// ========================= 小工具 =========================
-function baseSummary_() {
-  return { totalMarketValue: 0, totalCost: 0, totalPnl: 0, totalRr: 0 };
-}
-
-function parseDate_(s) {
-  if (!s) return null;
-  if (Object.prototype.toString.call(s) === "[object Date]" && !isNaN(s)) return s;
-  const str = String(s).trim().replaceAll("/", "-");
-  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  return isNaN(d) ? null : d;
-}
-
-function formatDate_(d) {
-  return Utilities.formatDate(d, TZ, "yyyy-MM-dd");
-}
-
-function normalizeSymbol_(s) {
-  if (s === null || s === undefined) return "";
-  return String(s).trim().toUpperCase();
-}
-
-function num_(x) {
-  const n = Number(x);
-  if (!isFinite(n)) throw new Error("數字欄位格式錯誤：" + x);
-  return n;
-}
-
-function num0_(x) {
-  const n = Number(x);
-  return isFinite(n) ? n : 0;
-}
-
-function blankOrNum_(x) {
-  if (x === "" || x === null || x === undefined) return "";
-  const n = Number(x);
-  if (!isFinite(n)) throw new Error("數字欄位格式錯誤：" + x);
-  return n;
-}
-
-function round_(n, digits) {
-  const p = Math.pow(10, digits);
-  return Math.round(n * p) / p;
-}
-
-function safeDiv_(a, b) {
-  const bn = Number(b);
-  if (!(bn > 0)) throw new Error("除數不可為 0 或空值");
-  return Number(a) / bn;
-}
-
-function toYearMonth_(value) {
-  if (!value) return "";
-  if (Object.prototype.toString.call(value) === "[object Date]" && !isNaN(value)) {
-    return Utilities.formatDate(value, TZ, "yyyy-MM");
-  }
-  const s = String(value).trim().replaceAll("/", "-");
-  let m = s.match(/^(\d{4})-(\d{2})$/);
-  if (m) return `${m[1]}-${m[2]}`;
-  m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (m) return `${m[1]}-${m[2]}`;
-  return "";
-}
-
-function enumerateMonths_(startYM, endYM) {
-  const [sy, sm] = startYM.split("-").map(x => parseInt(x, 10));
-  const [ey, em] = endYM.split("-").map(x => parseInt(x, 10));
-  if (!(sy && sm && ey && em)) return [];
-  const out = [];
-  let y = sy, m = sm;
-  while (y < ey || (y === ey && m <= em)) {
-    out.push(`${y}-${String(m).padStart(2, "0")}`);
-    m++;
-    if (m === 13) { m = 1; y++; }
-  }
-  return out;
-}
-
-function makeDateFromYMDay_(ym, day) {
-  const [y, m] = ym.split("-").map(x => parseInt(x, 10));
-  return new Date(y, m - 1, day);
-}
-
-function adjustWeekend_(d) {
-  const day = d.getDay();
-  if (day === 6) d.setDate(d.getDate() + 2);
-  if (day === 0) d.setDate(d.getDate() + 1);
-  return d;
-}
+</body>
+</html>
